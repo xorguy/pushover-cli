@@ -4,10 +4,10 @@ import getopt
 import sys
 import os
 import configparser
-import http.client as http
+import http.client
+import json
 from urllib.parse import urlencode
 import re
-from pathlib import Path
 
 
 class Pushover:
@@ -24,6 +24,9 @@ class Pushover:
     priorities = {"highest": PRIORITY_HIGHEST, "high": PRIORITY_HIGH, "normal": PRIORITY_NORMAL, "low": PRIORITY_LOW, "lowest": PRIORITY_LOWEST}
 
     VERSION = "1.3.0"
+
+    TIMEOUT = 30
+    MAX_MESSAGE_LENGTH = 1024
 
     verbose = False
 
@@ -42,10 +45,15 @@ class Pushover:
     html = False
     monospace = False
     multiline = False
+    lastStatus = None
 
     def printLn(self, message):
         if self.quiet == False:
             print(message)
+
+    def printErr(self, message):
+        if self.quiet == False:
+            print(message, file=sys.stderr)
 
     def exit(self, code):
         self.printLn("")
@@ -73,7 +81,7 @@ class Pushover:
         print("  -e --expire   <30 - 10800>          Default: 300")
         print("  -l --url      <url>                 Link the message to this URL")
         print("  -s --sound    <notification sound>  Default: pushover - see https://pushover.net/api#sounds")
-        print("  -c --config   <path to file>        Default: " + self.configFile)
+        print("  -c --config   <path to file>        Default: " + self.configFile + ", ~/.pushover-cli.conf")
         print("  -v --verbose                        Be verbose")
         print("  -q --quiet                          Be quiet")
         print("  -H --html                           Use HTML output. Requires v2.3 client.")
@@ -84,69 +92,84 @@ class Pushover:
     def validate(self):
 
         if self.user == None:
-            self.printLn('No user set')
+            self.printErr('No user set')
             self.usage()
             self.exit(1)
 
         if self.token == None:
-            self.printLn('No token set')
+            self.printErr('No token set')
             self.usage()
             self.exit(1)
 
-    def parseConfig(self):
+    def parsePriority(self, value):
+        if value not in self.priorities:
+            self.printErr("Invalid priority '" + value + "' (use one of: " + ", ".join(self.priorities) + ")")
+            self.exit(2)
+        return self.priorities[value]
 
-        if not os.path.isfile(self.configFile):
-            self.configFile = os.path.dirname(os.path.realpath(__file__)) + '/.pushover-cli.conf'
+    def parseConfig(self, explicit=None):
+        # -c replaces discovery; otherwise read system, script-dir, then user
+        # config, with later files overriding earlier ones.
+        if explicit:
+            files = [explicit]
+        else:
+            files = [self.configFile,
+                     os.path.join(os.path.dirname(os.path.realpath(__file__)), '.pushover-cli.conf'),
+                     os.path.join(os.path.expanduser('~'), '.pushover-cli.conf')]
 
-        if not os.path.isfile(self.configFile):
-            self.configFile = str(Path.home()) + '/.pushover-cli.conf'
+        config = configparser.ConfigParser(interpolation=None)
+        for path in files:
+            try:
+                with open(path, 'r') as f:
+                    config.read_string('[root]\n' + f.read(), source=path)
+            except OSError as err:
+                # A missing or unreadable (e.g. root-owned 0600) default file is not an error.
+                if explicit:
+                    self.printErr("Cannot read config file " + path + ": " + err.strerror)
+                    self.exit(1)
 
-        if os.path.isfile(self.configFile):
-            with open(self.configFile, 'r') as f:
-                ini_str = '[root]\n' + f.read()
-                config = configparser.ConfigParser()
-                config.read_string(ini_str)
+        if not config.has_section("root"):
+            return
 
-            if config.has_option("root", "user"):
-                self.user = config.get("root", "user")
+        if config.has_option("root", "user"):
+            self.user = config.get("root", "user")
 
-            if config.has_option("root", "token"):
-                self.token = config.get("root", "token")
+        if config.has_option("root", "token"):
+            self.token = config.get("root", "token")
 
-            if config.has_option("root", "retry"):
-                self.retry = config.get("root", "retry")
+        if config.has_option("root", "retry"):
+            self.retry = config.get("root", "retry")
 
-            if config.has_option("root", "expire"):
-                self.expire = config.get("root", "expire")
+        if config.has_option("root", "expire"):
+            self.expire = config.get("root", "expire")
 
-            if config.has_option("root", "device"):
-                self.device = config.get("root", "device")
+        if config.has_option("root", "device"):
+            self.device = config.get("root", "device")
 
-            if config.has_option("root", "url"):
-                self.url = config.get("root", "url")
+        if config.has_option("root", "url"):
+            self.url = config.get("root", "url")
 
-            if config.has_option("root", "priority"):
-                for name, priority in self.priorities.items():
-                    if name == config.get("root", "priority"):
-                        self.priority = priority
-            if config.has_option("root", "sound"):
-                self.sound = config.get("root", "sound")
+        if config.has_option("root", "priority"):
+            self.priority = self.parsePriority(config.get("root", "priority"))
 
-            if config.has_option("root", "verbose"):
-                if config.get("root", "verbose") in ("1", "On", "on"):
-                    self.verbose = True
+        if config.has_option("root", "sound"):
+            self.sound = config.get("root", "sound")
 
-            if config.has_option("root", "quiet"):
-                if config.get("root", "quiet") in ("1", "On", "on"):
-                    self.quiet = True
+        if config.has_option("root", "verbose"):
+            if config.get("root", "verbose") in ("1", "On", "on"):
+                self.verbose = True
 
-            if config.has_option("root", "html"):
-                if config.get("root", "html") in ("1", "On", "on"):
-                    self.html = True
+        if config.has_option("root", "quiet"):
+            if config.get("root", "quiet") in ("1", "On", "on"):
+                self.quiet = True
 
-            if config.has_option("root", "monospace"):
-                if config.get("root", "monospace") in ("1", "On", "on"):
-                    self.monospace = True
+        if config.has_option("root", "html"):
+            if config.get("root", "html") in ("1", "On", "on"):
+                self.html = True
+
+        if config.has_option("root", "monospace"):
+            if config.get("root", "monospace") in ("1", "On", "on"):
+                self.monospace = True
 
     def main(self):
         """
@@ -155,105 +178,120 @@ class Pushover:
         :return:
         """
 
-        self.parseConfig()
-
         try:
-            opts, args = getopt.getopt(sys.argv[1:], "hqvu:t:d:p:u:c:l:s:e:r:",
+            opts, args = getopt.getopt(sys.argv[1:], "hqvHMmu:t:d:p:c:l:s:e:r:",
                                        ["help", "user=", "token=", "device=", "priority=", "url=", "config=", "sound=", "expire=", "retry=", "verbose",
-                                        "quiet"])
+                                        "quiet", "html", "monospace", "multiline"])
         except getopt.GetoptError as err:
-            print(str(err))
+            print(str(err), file=sys.stderr)
             self.usage()
             self.exit(2)
+
+        # Handle --help and --config first so CLI options always override config values,
+        # regardless of their position on the command line.
+        explicitConfig = None
+        for o, a in opts:
+            if o in ("-h", "--help"):
+                self.usage()
+                self.exit(0)
+            elif o in ("-c", "--config"):
+                explicitConfig = a
+
+        self.parseConfig(explicitConfig)
+
+        if len(args) == 0:
+            self.usage()
+            self.exit(2)
+
+        self.message = args.pop(0)
 
         if len(args) > 0:
-            self.message = args.pop(0)
+            self.title = args.pop(0)
 
-            if len(args) > 0:
-                self.title = args.pop(0)
+        for o, a in opts:
+            if o in ("-v", "--verbose"):
+                self.verbose = True
+            elif o in ("-q", "--quiet"):
+                self.quiet = True
+            elif o in ("-u", "--user"):
+                self.user = a
+            elif o in ("-t", "--token"):
+                self.token = a
+            elif o in ("-d", "--device"):
+                self.device = a
+            elif o in ("-p", "--priority"):
+                self.priority = self.parsePriority(a)
+            elif o in ("-l", "--url"):
+                self.url = a
+            elif o in ("-s", "--sound"):
+                self.sound = a
+            elif o in ("-e", "--expire"):
+                self.expire = a
+            elif o in ("-r", "--retry"):
+                self.retry = a
+            elif o in ("-H", "--html"):
+                self.html = True
+            elif o in ("-m", "--multiline"):
+                self.multiline = True
+            elif o in ("-M", "--monospace"):
+                self.monospace = True
 
-            for o, a in opts:
-                if o in ("-h", "--help"):
-                    self.usage()
-                    self.exit(0)
-                elif o in ("-c", "--config"):
-                    self.configFile = a
-                    self.parseConfig()
-                elif o in ("-v", "--verbose"):
-                    self.verbose = True
-                elif o in ("-q", "--quiet"):
-                    self.quiet = True
-                elif o in ("-u", "--user"):
-                    self.user = a
-                elif o in ("-t", "--token"):
-                    self.token = a
-                elif o in ("-d", "--device"):
-                    self.device = a
-                elif o in ("-p", "--priority"):
-                    for name, priority in self.priorities.items():
-                        if name == a:
-                            self.priority = priority
-                elif o in ("-l", "--url"):
-                    self.url = a
-                elif o in ("-s", "--sound"):
-                    self.sound = a
-                elif o in ("-e", "--expire"):
-                    self.expire = a
-                elif o in ("-r", "--retry"):
-                    self.retry = a
-                elif o in ("-H", "--html"):
-                    self.html = True
-                elif o in ("-m", "--multiline"):
-                    self.multiline = True
-                elif o in ("-M", "--monospace"):
-                    self.monospace = True
+        self.validate()
 
-            self.validate()
+        if self.message != "-":
+            self.exit(0 if self.send() else 2)
 
-            if self.message == "-":
-                if self.multiline:
-                    self.message = ''
-                    while True:
-                        try:
-                            line = sys.stdin.readline()
-                            if len(line) > 0:
-                                self.message += line
-                        except KeyboardInterrupt:
+        # Don't crash on invalid bytes in the input stream.
+        if hasattr(sys.stdin, "reconfigure"):
+            sys.stdin.reconfigure(errors="replace")
+
+        if self.multiline:
+            self.message = ''
+            while True:
+                try:
+                    line = sys.stdin.readline()
+                except KeyboardInterrupt:
+                    break
+                if not line:
+                    break
+                self.message += line
+            if not self.message.strip():
+                self.printErr("No input on stdin")
+                self.exit(2)
+            self.exit(0 if self.send() else 2)
+
+        failed = False
+        while True:
+            try:
+                line = sys.stdin.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if len(line) > 0:
+                    self.message = line
+                    if not self.send():
+                        failed = True
+                        if self.lastStatus is not None and 400 <= self.lastStatus < 500:
+                            # Invalid request/credentials or quota: every further line would fail too.
                             break
-                        if not line:
-                            break
-                    self.send()
-                else:
-                    while True:
-                        try:
-                            line = sys.stdin.readline().strip()
-                            if len(line) > 0:
-                                self.message = line
-                                self.send()
-                        except KeyboardInterrupt:
-                            break
-                        if not line:
-                            break
-
-            else:
-
-                if self.send() == False:
-                    self.exit(2)
-                else:
-                    self.exit(0)
-        else:
-            self.usage()
-            self.exit(2)
+            except KeyboardInterrupt:
+                break
+        self.exit(2 if failed else 0)
 
     def send(self):
         """
         Send the message
 
-        :return:
+        :return: True on success
         """
+        if len(self.message) > self.MAX_MESSAGE_LENGTH:
+            self.printErr("Warning: message is " + str(len(self.message)) + " characters, truncating to "
+                          + str(self.MAX_MESSAGE_LENGTH))
+            self.message = self.message[:self.MAX_MESSAGE_LENGTH]
+
         if self.verbose:
-            self.printLn("User: " + self.user)
-            self.printLn("Token: " + self.token)
+            self.printLn("User: " + self.user[:4] + "...")
+            self.printLn("Token: " + self.token[:4] + "...")
             self.printLn("Device: " + str(self.device))
             self.printLn("Priority: " + str(self.priority))
             self.printLn("Url: " + str(self.url))
@@ -272,20 +310,22 @@ class Pushover:
             proxyport = proxyreg.group(2)
             if self.verbose:
                 self.printLn("Proxy: " + proxyhost + ":" + proxyport)
-            conn = http.HTTPSConnection(proxyhost, int(proxyport))
+            conn = http.client.HTTPSConnection(proxyhost, int(proxyport), timeout=self.TIMEOUT)
             conn.set_tunnel("api.pushover.net:443")
         else:
-            conn = http.HTTPSConnection("api.pushover.net:443")
+            conn = http.client.HTTPSConnection("api.pushover.net:443", timeout=self.TIMEOUT)
 
         post_pack = {
             "token": self.token,
             "user": self.user,
-            "title": self.title,
             "message": self.message,
             "priority": self.priority,
-            "url": self.url,
-            "sound": self.sound,
         }
+
+        # Omit empty optional fields so Pushover applies its own defaults.
+        for key in ("title", "url", "sound"):
+            if getattr(self, key):
+                post_pack[key] = getattr(self, key)
 
         if str(self.priority) == '2':
             post_pack["expire"] = self.expire
@@ -300,23 +340,44 @@ class Pushover:
         if self.monospace:
             post_pack["monospace"] = '1'
 
-        conn.request(
-            "POST",
-            "/1/messages.json",
-            urlencode(post_pack),
-            {"Content-type": "application/x-www-form-urlencoded"}
-        )
+        self.lastStatus = None
+        try:
+            conn.request(
+                "POST",
+                "/1/messages.json",
+                urlencode(post_pack),
+                {"Content-type": "application/x-www-form-urlencoded"}
+            )
+            response = conn.getresponse()
+            status, body = response.status, response.read()
+        except (http.client.HTTPException, OSError) as err:
+            # DNS failure, connection refused, TLS error, timeout, ...
+            self.printErr("Network error: " + str(err))
+            return False
+        finally:
+            conn.close()
 
-        response = conn.getresponse()
+        self.lastStatus = status
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            data = {}
 
-        if response.status == 200:
+        if status == 200 and data.get("status") == 1:
             self.printLn("Message \"" + self.message + "\" sent successfully")
             return True
-        else:
-            self.printLn(response.reason)
-            return False
+
+        errors = data.get("errors") or ["unexpected response"]
+        self.printErr("Pushover error (HTTP " + str(status) + "): " + "; ".join(str(e) for e in errors)
+                      + (" [request " + str(data["request"]) + "]" if data.get("request") else ""))
+        return False
 
 
 if __name__ == "__main__":
     pushover = Pushover()
-    pushover.main()
+    try:
+        pushover.main()
+    except KeyboardInterrupt:
+        sys.exit(130)
