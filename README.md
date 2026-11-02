@@ -5,14 +5,15 @@ pushover-cli is a Python-based command-line client for https://pushover.net to s
 of purposes, including:
 
 * Sending control messages to an old phone running Youtube to start/pause/stop/etc. the playing video remotely.
-* Piping streams to your cellphone (e.g. `tail -f /var/log/my.log | pushover-cli -`)
+* Piping low-volume streams to your cellphone (e.g. `tail -f /var/log/my.log | grep ERROR | pushover-cli -`).
+  Every line becomes a separate notification and counts against your application's monthly message quota.
 * It's essentially an MQTT channel, so anything that can read a pushover message can act on it.
 * Tie pushover notifications into your long-running scripts (build, cleanup, upgrade, etc.) to get notices of different system events.
 
 Requirements
 ------------
 * Linux (including WSL) or Mac OSX
-* Python 3.x
+* Python 3.7+
 * Your own [pushover application token](https://pushover.net/apps/build).
 * Your pushover user key, which can be found [here](https://pushover.net).
 
@@ -20,12 +21,15 @@ Requirements
 Download and installation
 -------------------------
 
-Simply execute the following command to install the latest version of this script to your system:
+Download the script, review it, then install it (replace `master` with a commit hash to pin a known version):
 
 ```sh
-sudo curl -o /usr/bin/pushover-cli https://raw.githubusercontent.com/markus-perl/pushover-cli/master/pushover-cli 
-sudo chmod 555 /usr/bin/pushover-cli
-```    
+curl -fsSL -o pushover-cli https://raw.githubusercontent.com/markus-perl/pushover-cli/master/pushover-cli
+less pushover-cli
+sudo install -m 755 pushover-cli /usr/local/bin/pushover-cli
+```
+
+`/usr/local/bin` is used because `/usr/bin` is read-only on macOS (System Integrity Protection).
 
 Commandline options
 -------------------
@@ -43,7 +47,7 @@ Example: pushover-cli -u ubLBe5u3zNXF9gBtX2zKkezSuPgu3v -t aK5BW3sjAqPsedH44VyQS
     -e --expire   <30 - 10800>          Default: 300)
     -l --url      <url>                 Link the message to this URL
     -s --sound    <notification sound>  Default: pushover - see https://pushover.net/api#sounds
-    -c --config   <path to file>        Default: /etc/pushover.conf
+    -c --config   <path to file>        Default: /etc/pushover-cli.conf, ~/.pushover-cli.conf
     -v --verbose                        Be verbose
     -q --quiet                          Be quiet
     -H --html                           Use HTML output. Requires v2.3 client.
@@ -62,7 +66,18 @@ to Pushover through it.
 Config file
 -------------------
 
-Every command line option can also be set by creating the config file ~/.pushover-cli.conf or /etc/pushover-cli.conf
+Every command line option can also be set by creating the config file ~/.pushover-cli.conf or /etc/pushover-cli.conf.
+
+If both exist, both are read and values in ~/.pushover-cli.conf override those in /etc/pushover-cli.conf.
+Command line options always override config file values. `-c <file>` reads only that file instead of the defaults.
+
+The config file contains your private user key and application token, so restrict its permissions:
+
+```sh
+chmod 600 ~/.pushover-cli.conf
+```
+
+Prefer the config file over `-u`/`-t`: command line arguments are visible to other users in `ps` and are saved in your shell history.
 
 Example file:
 
